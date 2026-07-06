@@ -14,7 +14,7 @@
         
         <service
             android:name=".ScreenRecordService"
-            android:foregroundServiceType="mediaProjection"
+            android:foregroundServiceType="mediaProjection|microphone"
             android:exported="false" />
             
         <activity android:name=".MainActivity" android:exported="true">
