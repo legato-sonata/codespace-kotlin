@@ -1,18 +1,32 @@
 package com.example.myapp
 
-import android.app.Activity
 import android.os.Bundle
-import android.widget.TextView
-import android.view.Gravity
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import dagger.hilt.android.AndroidEntryPoint
 
-class MainActivity : Activity() {
+@AndroidEntryPoint
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val textView = TextView(this).apply {
-            text = "Hello from GitHub Codespaces!"
-            textSize = 24f
-            gravity = Gravity.CENTER
+        setContent {
+            MaterialTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(text = "Hello from Jetpack Compose & Hilt!", style = MaterialTheme.typography.headlineMedium)
+                    }
+                }
+            }
         }
-        setContentView(textView)
     }
 }
