@@ -211,7 +211,21 @@ class ScreenRecordService : Service() {
         var presentationTimeUs = 0L
 
         while (isRecording) {
-            val readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size) ?: 0
+            var readBytes = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size, AudioRecord.READ_NON_BLOCKING) ?: 0
+            } else {
+                readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size) ?: 0
+            }
+            
+            // If no internal audio is currently playing, readBytes will be 0.
+            // We must feed silence into the encoder to keep A/V sync and trigger the muxer.
+            if (readBytes <= 0) {
+                readBytes = audioBuffer.size
+                audioBuffer.fill(0)
+                Thread.sleep(10) // Small delay to prevent CPU spinning when forcing silence
+            }
+
             if (readBytes > 0) {
                 val inputBufferIndex = audioCodec?.dequeueInputBuffer(10000) ?: -1
                 if (inputBufferIndex >= 0) {
@@ -225,12 +239,13 @@ class ScreenRecordService : Service() {
             }
 
             var encoderStatus = audioCodec?.dequeueOutputBuffer(bufferInfo, 10000) ?: -1
-            while (encoderStatus >= 0) {
+            while (encoderStatus != MediaCodec.INFO_TRY_AGAIN_LATER && isRecording) {
                 if (encoderStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    // Handled synchronously if possible, but simplified for concurrent access
                     val newFormat = audioCodec?.outputFormat
-                    audioTrackIndex = muxer?.addTrack(newFormat!!) ?: -1
-                    startMuxerIfReady()
+                    if (newFormat != null) {
+                        audioTrackIndex = muxer?.addTrack(newFormat) ?: -1
+                        startMuxerIfReady()
+                    }
                 } else if (encoderStatus >= 0) {
                     val encodedData = audioCodec?.getOutputBuffer(encoderStatus)
                     if (encodedData != null && muxerStarted) {
