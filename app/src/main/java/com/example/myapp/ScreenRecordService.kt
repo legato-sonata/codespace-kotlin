@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.AudioAttributes
@@ -20,17 +21,18 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.WindowManager
-import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
-import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -39,6 +41,7 @@ class ScreenRecordService : Service() {
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
+    private var mediaProjectionCallback: MediaProjection.Callback? = null
 
     private var videoCodec: MediaCodec? = null
     private var audioCodec: MediaCodec? = null
@@ -48,6 +51,8 @@ class ScreenRecordService : Service() {
     private var videoTrackIndex = -1
     private var audioTrackIndex = -1
     private var muxerStarted = false
+
+    private var playbackCaptureUsable = false
 
     private val coroutineScope = CoroutineScope(Dispatchers.IO + Job())
     private var isRecording = false
@@ -59,6 +64,7 @@ class ScreenRecordService : Service() {
         const val EXTRA_RESULT_DATA = "EXTRA_RESULT_DATA"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "ScreenRecordChannel"
+        private const val TAG = "ScreenRecordService"
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -88,10 +94,27 @@ class ScreenRecordService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
 
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projectionManager.getMediaProjection(resultCode, resultData)
+
+        mediaProjectionCallback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                Log.w(TAG, "MediaProjection stopped by the system; stopping recording.")
+                stopRecording()
+            }
+        }
+        mediaProjection?.registerCallback(mediaProjectionCallback!!, Handler(Looper.getMainLooper()))
 
         isRecording = true
 
@@ -101,12 +124,9 @@ class ScreenRecordService : Service() {
 
         setupMuxerAndCodecs(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
 
-        // Start reading threads
-        coroutineScope.launch {
-            recordVideo()
-        }
-        coroutineScope.launch {
-            recordAudio()
+        coroutineScope.launch { recordVideo() }
+        if (playbackCaptureUsable) {
+            coroutineScope.launch { recordAudio() }
         }
     }
 
@@ -127,7 +147,7 @@ class ScreenRecordService : Service() {
 
         videoCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         videoCodec?.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        
+
         val inputSurface = videoCodec?.createInputSurface()
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenRecord",
@@ -142,8 +162,6 @@ class ScreenRecordService : Service() {
         val channelConfig = AudioFormat.CHANNEL_IN_MONO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 2
-
-        var internalAudioFailed = false
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mediaProjection != null) {
             try {
@@ -168,43 +186,33 @@ class ScreenRecordService : Service() {
                     .setBufferSizeInBytes(minBufferSize)
                     .build()
 
-                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                    android.util.Log.e("ScreenRecord", "Internal AudioRecord failed to initialize. Falling back to MIC.")
-                    internalAudioFailed = true
+                if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
+                    playbackCaptureUsable = true
+                    Log.d(TAG, "Playback-capture AudioRecord initialized OK.")
+                } else {
+                    Log.e(TAG, "AudioRecord failed to initialize (state=${audioRecord?.state}).")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("ScreenRecord", "Exception setting up internal audio: ${e.message}")
-                internalAudioFailed = true
-            }
-        } else {
-            internalAudioFailed = true
-        }
-
-        if (internalAudioFailed) {
-            audioRecord = AudioRecord(
-                android.media.MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                minBufferSize
-            )
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                android.util.Log.e("ScreenRecord", "Fallback MIC AudioRecord failed to initialize too.")
+                Log.e(TAG, "Failed to set up playback capture", e)
+                audioRecord = null
+                playbackCaptureUsable = false
             }
         }
 
-        val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1)
-        aFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-        aFormat.setInteger(MediaFormat.KEY_BIT_RATE, 128000)
-        aFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, minBufferSize)
+        if (playbackCaptureUsable) {
+            val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1)
+            aFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            aFormat.setInteger(MediaFormat.KEY_BIT_RATE, 128000)
+            aFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, minBufferSize)
 
-        audioCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        audioCodec?.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        audioCodec?.start()
-        
-        audioRecord?.startRecording()
-        if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            android.util.Log.e("ScreenRecord", "AudioRecord failed to start recording.")
+            audioCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            audioCodec?.configure(aFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            audioCodec?.start()
+
+            audioRecord?.startRecording()
+            if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                Log.e(TAG, "AudioRecord.startRecording() did not actually start recording.")
+            }
         }
     }
 
@@ -241,22 +249,42 @@ class ScreenRecordService : Service() {
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2
         val audioBuffer = ByteArray(minBufferSize)
 
-        var presentationTimeUs = 0L
+        var loggedFirstRead = false
+        var loggedSilenceWarning = false
+        var totalBytesRead = 0L
 
         while (isRecording) {
             val readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size) ?: 0
-            
+
             if (readBytes < 0) {
-                android.util.Log.e("ScreenRecord", "Audio read error code: $readBytes")
-                break
+                Log.e(TAG, "AudioRecord.read() returned error code $readBytes")
             } else if (readBytes > 0) {
+                if (!loggedFirstRead) {
+                    Log.d(TAG, "First audio buffer captured ($readBytes bytes) - pipeline is alive.")
+                    loggedFirstRead = true
+                }
+                totalBytesRead += readBytes
+
+                if (!loggedSilenceWarning && totalBytesRead > sampleRate * 2) {
+                    val allZero = audioBuffer.take(readBytes).all { it == 0.toByte() }
+                    if (allZero) {
+                        Log.w(
+                            TAG,
+                            "Captured audio is all-zero silence. The foreground app most " +
+                                "likely disallows playback capture (manifest " +
+                                "allowAudioPlaybackCapture=\"false\"). This cannot be " +
+                                "overridden from the recording app."
+                        )
+                    }
+                    loggedSilenceWarning = true
+                }
+
                 val inputBufferIndex = audioCodec?.dequeueInputBuffer(10000) ?: -1
                 if (inputBufferIndex >= 0) {
                     val inputBuffer = audioCodec?.getInputBuffer(inputBufferIndex)
                     inputBuffer?.clear()
                     inputBuffer?.put(audioBuffer, 0, readBytes)
                     val ptsUs = System.nanoTime() / 1000
-                    if (presentationTimeUs == 0L) presentationTimeUs = ptsUs
                     audioCodec?.queueInputBuffer(inputBufferIndex, 0, readBytes, ptsUs, 0)
                 }
             }
@@ -267,7 +295,6 @@ class ScreenRecordService : Service() {
                     val newFormat = audioCodec?.outputFormat
                     if (newFormat != null) {
                         audioTrackIndex = muxer?.addTrack(newFormat) ?: -1
-                        android.util.Log.d("ScreenRecord", "Audio track added, index: $audioTrackIndex")
                         startMuxerIfReady()
                     }
                 } else if (encoderStatus >= 0) {
@@ -292,38 +319,46 @@ class ScreenRecordService : Service() {
 
     @Synchronized
     private fun startMuxerIfReady() {
-        if (!muxerStarted && videoTrackIndex >= 0 && audioTrackIndex >= 0) {
-            muxer?.start()
-            muxerStarted = true
+        if (!muxerStarted) {
+            val audioReady = if (playbackCaptureUsable) audioTrackIndex >= 0 else true
+            val videoReady = videoTrackIndex >= 0
+            
+            if (videoReady && audioReady) {
+                muxer?.start()
+                muxerStarted = true
+            }
         }
     }
 
     private fun stopRecording() {
+        if (!isRecording) return
         isRecording = false
         try {
             audioRecord?.stop()
             audioRecord?.release()
-            
+
             videoCodec?.stop()
             videoCodec?.release()
-            
+
             audioCodec?.stop()
             audioCodec?.release()
-            
+
             if (muxerStarted) {
                 muxer?.stop()
                 muxer?.release()
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error while stopping recording", e)
         }
-        
+
         virtualDisplay?.release()
+        mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
         mediaProjection?.stop()
-        
+
         muxerStarted = false
         videoTrackIndex = -1
         audioTrackIndex = -1
+        playbackCaptureUsable = false
     }
 
     private fun createNotificationChannel() {
