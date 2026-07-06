@@ -57,6 +57,9 @@ class ScreenRecordService : Service() {
     private val coroutineScope = CoroutineScope(Dispatchers.IO + Job())
     private var isRecording = false
 
+    private var videoJob: Job? = null
+    private var audioJob: Job? = null
+
     companion object {
         const val ACTION_START = "ACTION_START"
         const val ACTION_STOP = "ACTION_STOP"
@@ -124,9 +127,9 @@ class ScreenRecordService : Service() {
 
         setupMuxerAndCodecs(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
 
-        coroutineScope.launch { recordVideo() }
+        videoJob = coroutineScope.launch { recordVideo() }
         if (playbackCaptureUsable) {
-            coroutineScope.launch { recordAudio() }
+            audioJob = coroutineScope.launch { recordAudio() }
         }
     }
 
@@ -157,9 +160,9 @@ class ScreenRecordService : Service() {
         )
         videoCodec?.start()
 
-        // Audio Codec & Record Setup
+        // Audio Codec & Record Setup - changed to Stereo for broader compatibility
         val sampleRate = 44100
-        val channelConfig = AudioFormat.CHANNEL_IN_MONO
+        val channelConfig = AudioFormat.CHANNEL_IN_STEREO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 2
 
@@ -199,8 +202,12 @@ class ScreenRecordService : Service() {
             }
         }
 
+        Handler(Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(this, "Internal Audio Usable: $playbackCaptureUsable", android.widget.Toast.LENGTH_LONG).show()
+        }
+
         if (playbackCaptureUsable) {
-            val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1)
+            val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 2)
             aFormat.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
             aFormat.setInteger(MediaFormat.KEY_BIT_RATE, 128000)
             aFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, minBufferSize)
@@ -246,7 +253,7 @@ class ScreenRecordService : Service() {
     private fun recordAudio() {
         val bufferInfo = MediaCodec.BufferInfo()
         val sampleRate = 44100
-        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT) * 2
+        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT) * 2
         val audioBuffer = ByteArray(minBufferSize)
 
         var loggedFirstRead = false
@@ -265,16 +272,17 @@ class ScreenRecordService : Service() {
                 }
                 totalBytesRead += readBytes
 
-                if (!loggedSilenceWarning && totalBytesRead > sampleRate * 2) {
+                if (!loggedSilenceWarning && totalBytesRead > sampleRate * 4) {
                     val allZero = audioBuffer.take(readBytes).all { it == 0.toByte() }
                     if (allZero) {
                         Log.w(
                             TAG,
                             "Captured audio is all-zero silence. The foreground app most " +
-                                "likely disallows playback capture (manifest " +
-                                "allowAudioPlaybackCapture=\"false\"). This cannot be " +
-                                "overridden from the recording app."
+                                "likely disallows playback capture."
                         )
+                        Handler(Looper.getMainLooper()).post {
+                            android.widget.Toast.makeText(this@ScreenRecordService, "WARNING: App is blocking audio capture (silence)", android.widget.Toast.LENGTH_LONG).show()
+                        }
                     }
                     loggedSilenceWarning = true
                 }
@@ -333,32 +341,38 @@ class ScreenRecordService : Service() {
     private fun stopRecording() {
         if (!isRecording) return
         isRecording = false
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
 
-            videoCodec?.stop()
-            videoCodec?.release()
+        coroutineScope.launch {
+            videoJob?.join()
+            audioJob?.join()
 
-            audioCodec?.stop()
-            audioCodec?.release()
+            try {
+                audioRecord?.stop()
+                audioRecord?.release()
 
-            if (muxerStarted) {
-                muxer?.stop()
-                muxer?.release()
+                videoCodec?.stop()
+                videoCodec?.release()
+
+                audioCodec?.stop()
+                audioCodec?.release()
+
+                if (muxerStarted) {
+                    muxer?.stop()
+                    muxer?.release()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error while stopping recording", e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error while stopping recording", e)
+
+            virtualDisplay?.release()
+            mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
+            mediaProjection?.stop()
+
+            muxerStarted = false
+            videoTrackIndex = -1
+            audioTrackIndex = -1
+            playbackCaptureUsable = false
         }
-
-        virtualDisplay?.release()
-        mediaProjectionCallback?.let { mediaProjection?.unregisterCallback(it) }
-        mediaProjection?.stop()
-
-        muxerStarted = false
-        videoTrackIndex = -1
-        audioTrackIndex = -1
-        playbackCaptureUsable = false
     }
 
     private fun createNotificationChannel() {
