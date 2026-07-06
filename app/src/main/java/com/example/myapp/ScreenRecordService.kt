@@ -143,24 +143,54 @@ class ScreenRecordService : Service() {
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat) * 2
 
+        var internalAudioFailed = false
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mediaProjection != null) {
-            val audioPlaybackConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build()
+            try {
+                val audioPlaybackConfig = AudioPlaybackCaptureConfiguration.Builder(mediaProjection!!)
+                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                    .addMatchingUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .addMatchingUsage(AudioAttributes.USAGE_ALARM)
+                    .addMatchingUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .build()
 
-            val audioFormatObj = AudioFormat.Builder()
-                .setEncoding(audioFormat)
-                .setSampleRate(sampleRate)
-                .setChannelMask(channelConfig)
-                .build()
+                val audioFormatObj = AudioFormat.Builder()
+                    .setEncoding(audioFormat)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelConfig)
+                    .build()
 
-            audioRecord = AudioRecord.Builder()
-                .setAudioFormat(audioFormatObj)
-                .setAudioPlaybackCaptureConfig(audioPlaybackConfig)
-                .setBufferSizeInBytes(minBufferSize)
-                .build()
+                audioRecord = AudioRecord.Builder()
+                    .setAudioFormat(audioFormatObj)
+                    .setAudioPlaybackCaptureConfig(audioPlaybackConfig)
+                    .setBufferSizeInBytes(minBufferSize)
+                    .build()
+
+                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                    android.util.Log.e("ScreenRecord", "Internal AudioRecord failed to initialize. Falling back to MIC.")
+                    internalAudioFailed = true
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("ScreenRecord", "Exception setting up internal audio: ${e.message}")
+                internalAudioFailed = true
+            }
+        } else {
+            internalAudioFailed = true
+        }
+
+        if (internalAudioFailed) {
+            audioRecord = AudioRecord(
+                android.media.MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                minBufferSize
+            )
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                android.util.Log.e("ScreenRecord", "Fallback MIC AudioRecord failed to initialize too.")
+            }
         }
 
         val aFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1)
@@ -173,6 +203,9 @@ class ScreenRecordService : Service() {
         audioCodec?.start()
         
         audioRecord?.startRecording()
+        if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            android.util.Log.e("ScreenRecord", "AudioRecord failed to start recording.")
+        }
     }
 
     private fun recordVideo() {
@@ -213,7 +246,10 @@ class ScreenRecordService : Service() {
         while (isRecording) {
             val readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size) ?: 0
             
-            if (readBytes > 0) {
+            if (readBytes < 0) {
+                android.util.Log.e("ScreenRecord", "Audio read error code: $readBytes")
+                break
+            } else if (readBytes > 0) {
                 val inputBufferIndex = audioCodec?.dequeueInputBuffer(10000) ?: -1
                 if (inputBufferIndex >= 0) {
                     val inputBuffer = audioCodec?.getInputBuffer(inputBufferIndex)
@@ -231,6 +267,7 @@ class ScreenRecordService : Service() {
                     val newFormat = audioCodec?.outputFormat
                     if (newFormat != null) {
                         audioTrackIndex = muxer?.addTrack(newFormat) ?: -1
+                        android.util.Log.d("ScreenRecord", "Audio track added, index: $audioTrackIndex")
                         startMuxerIfReady()
                     }
                 } else if (encoderStatus >= 0) {
