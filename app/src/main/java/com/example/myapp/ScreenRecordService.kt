@@ -211,21 +211,8 @@ class ScreenRecordService : Service() {
         var presentationTimeUs = 0L
 
         while (isRecording) {
-            var readBytes = 0
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size, AudioRecord.READ_NON_BLOCKING) ?: 0
-            } else {
-                readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size) ?: 0
-            }
+            val readBytes = audioRecord?.read(audioBuffer, 0, audioBuffer.size) ?: 0
             
-            // If no internal audio is currently playing, readBytes will be 0.
-            // We must feed silence into the encoder to keep A/V sync and trigger the muxer.
-            if (readBytes <= 0) {
-                readBytes = audioBuffer.size
-                audioBuffer.fill(0)
-                Thread.sleep(10) // Small delay to prevent CPU spinning when forcing silence
-            }
-
             if (readBytes > 0) {
                 val inputBufferIndex = audioCodec?.dequeueInputBuffer(10000) ?: -1
                 if (inputBufferIndex >= 0) {
