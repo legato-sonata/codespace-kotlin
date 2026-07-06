@@ -1,17 +1,13 @@
 {
   "name": "Android Kotlin Development",
-  "build": {
-    "dockerfile": "Dockerfile"
-  },
+  "image": "mcr.microsoft.com/devcontainers/java:17-bullseye",
   "features": {
     "ghcr.io/devcontainers/features/sshd:1": {
       "version": "latest"
-    }
+    },
+    "ghcr.io/NordcomInc/devcontainer-features/android-sdk:1": {}
   },
   "remoteUser": "vscode",
-  "remoteEnv": {
-    "ANDROID_SDK_ROOT": "/opt/android-sdk"
-  },
   "customizations": {
     "vscode": {
       "extensions": [
