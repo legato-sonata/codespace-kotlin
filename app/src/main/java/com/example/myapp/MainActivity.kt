@@ -50,9 +50,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted: Boolean ->
-        // Continue even if notification permission is denied, it just won't show the persistent notification correctly on Android 13+
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        // Continue even if permissions are denied, the system will just omit audio or notifications
         startScreenCapture()
     }
 
@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            text = if (isRecording) "Recording Screen..." else "Screen Recorder Ready",
+                            text = if (isRecording) "Recording Screen & Audio..." else "Screen Recorder Ready",
                             style = MaterialTheme.typography.headlineMedium
                         )
                         Spacer(modifier = Modifier.height(32.dp))
@@ -91,11 +91,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkPermissionsAndStart() {
+        val permissionsToRequest = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            startScreenCapture()
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
     }
 
     private fun startScreenCapture() {
