@@ -172,9 +172,6 @@ class ScreenRecordService : Service() {
                     .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
                     .addMatchingUsage(AudioAttributes.USAGE_GAME)
                     .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                    .addMatchingUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .addMatchingUsage(AudioAttributes.USAGE_ALARM)
-                    .addMatchingUsage(AudioAttributes.USAGE_NOTIFICATION)
                     .build()
 
                 val audioFormatObj = AudioFormat.Builder()
